@@ -36,7 +36,7 @@ def auto_bs(n, base=128):
 BATCH_SIZE = auto_bs(len(ds_tr))
 NUM_WORKERS = 0
 
-train_loader = DataLoader(ds_tr, batch_size=BATCH_SIZE, shuffle=True,  drop_last=False, num_workers=NUM_WORKERS)
+train_loader = DataLoader(ds_tr, batch_size=BATCH_SIZE, shuffle=False,  drop_last=False, num_workers=NUM_WORKERS)
 val_loader   = DataLoader(ds_va, batch_size=BATCH_SIZE, shuffle=False, drop_last=False, num_workers=NUM_WORKERS)
 test_loader  = DataLoader(ds_te, batch_size=BATCH_SIZE, shuffle=False, drop_last=False, num_workers=NUM_WORKERS)
 
@@ -145,13 +145,22 @@ def evaluate(loader):
 # 모델 훈련
 from tqdm import tqdm
 
+
 # 학습 함수
 def train(num_epochs=30, grad_clip=1.0, es_patience=6):
     best_score = float("inf") if target_kind != "direction" else -float("inf")
     best_path = Path("models"); best_path.mkdir(exist_ok=True, parents=True)
     best_path = best_path / f"{Code}_best.pt"
     bad = 0
-
+# ---- 기록용 history ----
+    history = {
+        "train_loss": [],
+        "val_loss": [],
+        "val_rmse": [],
+        "val_mae": [],
+        "val_acc": []  # 분류일 때만 유효
+    }
+    
     for epoch in range(1, num_epochs+1):
         model.train()
         total, n = 0.0, 0
@@ -182,6 +191,15 @@ def train(num_epochs=30, grad_clip=1.0, es_patience=6):
         val_loss, val_metrics = evaluate(val_loader)
         scheduler.step(val_loss)
 
+        # ---- history 기록 ----
+        history["train_loss"].append(train_loss)
+        history["val_loss"].append(val_loss)
+        if target_kind == "direction":
+            history["val_acc"].append(val_metrics.get("acc", float("nan")))
+        else:
+            history["val_rmse"].append(val_metrics.get("rmse", float("nan")))
+            history["val_mae"].append(val_metrics.get("mae", float("nan")))
+                                      
         # Early Stopping 기준
         if target_kind == "direction":
             score = val_metrics["acc"]
@@ -212,10 +230,10 @@ def train(num_epochs=30, grad_clip=1.0, es_patience=6):
             print("Early stopping.")
             break
 
-    return best_path
+    return best_path, history
 
 # 실행
-best_model_path = train(num_epochs=30)
+best_model_path, history = train(num_epochs=30)
 model.load_state_dict(torch.load(best_model_path)["model"])
 test_loss, test_metrics = evaluate(test_loader)
 
@@ -223,3 +241,33 @@ if target_kind == "direction":
     print(f"[TEST] loss {test_loss:.4f} | acc {test_metrics['acc']:.3f}")
 else:
     print(f"[TEST] loss {test_loss:.4f} | rmse {test_metrics['rmse']:.4f} | mae {test_metrics['mae']:.4f}")
+    
+
+import matplotlib.pyplot as plt
+
+epochs = range(1, len(history["train_loss"]) + 1)
+
+# 1. Train vs Validation Loss
+plt.figure(1,figsize=(12,5))
+
+plt.subplot(1,2,1)
+plt.plot(epochs, history["train_loss"], label="Train Loss")
+plt.plot(epochs, history["val_loss"], label="Val Loss")
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
+plt.title("Train vs Validation Loss")
+plt.legend()
+plt.grid(True)
+
+# 2. Validation RMSE & MAE
+plt.subplot(1,2,2)
+plt.plot(epochs, history["val_rmse"], label="Val RMSE")
+plt.plot(epochs, history["val_mae"], label="Val MAE")
+plt.xlabel("Epoch")
+plt.ylabel("Error")
+plt.title("Validation RMSE & MAE")
+plt.legend()
+plt.grid(True)
+
+plt.tight_layout()
+plt.show()

@@ -194,6 +194,7 @@ def add_multi_targets(df: pd.DataFrame, horizons: list = [1], target_kind: str =
     out = out.dropna(subset=target_cols)
     return out
 
+
 def time_split(df: pd.DataFrame, split: SplitConfig) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     n = len(df)
     i_tr = int(n * split.train_ratio)
