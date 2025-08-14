@@ -286,22 +286,94 @@ def build_windows(df: pd.DataFrame, feat: FeatureConfig, lookback, horizons) -> 
 # 4) PyTorch Dataset
 # -----------------------------
 
-class MultiInputTSDataset(Dataset):
-    def __init__(self, X_price: np.ndarray, X_flow: np.ndarray, X_fund: np.ndarray, y: np.ndarray):
-        self.Xp = torch.from_numpy(X_price)
-        self.Xf = torch.from_numpy(X_flow)
-        self.Xd = torch.from_numpy(X_fund)
-        self.y  = torch.from_numpy(y).view(-1,1)
-    def __len__(self): return len(self.y)
+class MultiInputTSDataset(torch.utils.data.Dataset):
+    def __init__(self, Xp, Xf, Xd, y, lookback, horizons):
+        """
+        Xp, Xf, Xd: np.ndarray (N, F)
+        y:  (N,), (N,1)  또는 (N, H)  # H = len(horizons)인 다중 horizon 타깃도 허용
+        lookback: int
+        horizons: int | list[int]     # 예: 1 또는 [1,2,3]
+        """
+        self.lookback = int(lookback)
+
+        # horizons 표준화
+        if isinstance(horizons, (list, tuple, np.ndarray)):
+            self.horizons = [int(h) for h in horizons]
+        else:
+            self.horizons = [int(horizons)]
+        H = len(self.horizons)
+        horizon_max = max(self.horizons)
+
+        # 배열화
+        Xp = np.asarray(Xp); Xf = np.asarray(Xf); Xd = np.asarray(Xd)
+        y  = np.asarray(y)
+
+        # y 형태 판별
+        if y.ndim == 1:                            # (N,)
+            mode = "single_series"
+            needed_future = horizon_max
+        elif y.ndim == 2 and y.shape[1] == 1:      # (N,1) -> (N,)
+            y = y[:, 0]
+            mode = "single_series"
+            needed_future = horizon_max
+        elif y.ndim == 2 and y.shape[1] == H:      # (N, H) 이미 다중 horizon 정렬됨
+            mode = "multi_ready"
+            needed_future = 1                      # 한 행만 쓰면 됨
+        else:
+            raise ValueError(
+                f"y shape 불일치: 기대 (N,), (N,1), (N,{H}) 중 하나, 현재 {y.shape}"
+            )
+
+        # 사용 가능한 시작 인덱스
+        max_start = len(y) - self.lookback - needed_future + 1
+        if max_start <= 0:
+            raise ValueError(
+                f"데이터 길이 부족: len(y)={len(y)}, lookback={self.lookback}, "
+                f"needed_future={needed_future}"
+            )
+
+        # 윈도우 슬라이싱
+        Xp_list, Xf_list, Xd_list, y_list = [], [], [], []
+        for i in range(max_start):
+            Xp_list.append(Xp[i:i+self.lookback])
+            Xf_list.append(Xf[i:i+self.lookback])
+            Xd_list.append(Xd[i:i+self.lookback])
+
+            if mode == "single_series":
+                # 원시 단일 시계열에서 horizons 만큼 미래 타깃 직접 수집
+                targets = [y[i+self.lookback+h-1] for h in self.horizons]  # 길이 H
+            else:
+                # (N,H) 이미 정렬된 경우: 현재 앵커의 한 행을 그대로 사용
+                targets = y[i+self.lookback-1, :]  # shape (H,)
+            y_list.append(targets)
+
+        # 배열화 & shape 고정: (N_samples, L, F), y: (N_samples, H)
+        self.Xp = np.array(Xp_list).reshape(-1, self.lookback, Xp.shape[-1])
+        self.Xf = np.array(Xf_list).reshape(-1, self.lookback, Xf.shape[-1])
+        self.Xd = np.array(Xd_list).reshape(-1, self.lookback, Xd.shape[-1])
+        self.y  = np.array(y_list, dtype=np.float32).reshape(-1, H)
+
+    def __len__(self):
+        return self.y.shape[0]
+
     def __getitem__(self, idx):
         return {
-            "x_price": self.Xp[idx],   # [L, P]
-            "x_flow":  self.Xf[idx],   # [L, Q]
-            "x_fund":  self.Xd[idx],   # [L, R]
-            "y":       self.y[idx],    # [1]
+            "x_price": torch.tensor(self.Xp[idx], dtype=torch.float32),
+            "x_flow":  torch.tensor(self.Xf[idx], dtype=torch.float32),
+            "x_fund":  torch.tensor(self.Xd[idx], dtype=torch.float32),
+            "y":       torch.tensor(self.y[idx],  dtype=torch.float32),  # (H,)
         }
 
-    
+    def __len__(self):
+        return self.y.shape[0]
+
+    def __getitem__(self, idx):
+        return {
+            "x_price": torch.tensor(self.Xp[idx], dtype=torch.float32),
+            "x_flow":  torch.tensor(self.Xf[idx], dtype=torch.float32),
+            "x_fund":  torch.tensor(self.Xd[idx], dtype=torch.float32),
+            "y":       torch.tensor(self.y[idx],  dtype=torch.float32),  # (len(horizons),)
+        }
 @dataclass
 class PipelineConfig:
     lookback: int = 20

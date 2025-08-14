@@ -14,7 +14,7 @@ cfg = PipelineConfig()
 cfg.lookback = 20 # Lookback period for the model
 cfg.horizons = [1, 2, 3] # Prediction horizon (3 days ahead)
 cfg.target_kind = "logr"  # or "pct", or "close"
-cfg.split = SplitConfig(train_ratio=0.7, val_ratio=0.15, test_ratio=0.15)
+cfg.split = SplitConfig(train_ratio=0.6, val_ratio=0.2, test_ratio=0.2)
 
 
 # 2) target
@@ -38,9 +38,9 @@ Xp_va, Xf_va, Xd_va, y_va = build_windows(va_s, feat, lookback=cfg.lookback, hor
 Xp_te, Xf_te, Xd_te, y_te = build_windows(te_s, feat, lookback=cfg.lookback, horizons=cfg.horizons)
 
 # 7) torch datasets
-ds_tr = MultiInputTSDataset(Xp_tr, Xf_tr, Xd_tr, y_tr)
-ds_va = MultiInputTSDataset(Xp_va, Xf_va, Xd_va, y_va)
-ds_te = MultiInputTSDataset(Xp_te, Xf_te, Xd_te, y_te)
+ds_tr = MultiInputTSDataset(Xp_tr, Xf_tr, Xd_tr, y_tr,cfg.lookback, cfg.horizons)
+ds_va = MultiInputTSDataset(Xp_va, Xf_va, Xd_va, y_va, cfg.lookback, cfg.horizons)
+ds_te = MultiInputTSDataset(Xp_te, Xf_te, Xd_te, y_te, cfg.lookback, cfg.horizons)
 meta = {
     "feature_config": feat.__dict__,
     "scalers": "StandardScaler per-branch (fit on train)",
