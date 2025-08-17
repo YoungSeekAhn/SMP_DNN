@@ -6,11 +6,13 @@ from sklearn.preprocessing import StandardScaler
 import torch
 from torch.utils.data import Dataset, DataLoader
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from pykrx import stock
 
 # -----------------------------
 # 1) Standardize & Merge
 # -----------------------------
-
+        
 def _ensure_datetime_index(df: pd.DataFrame, date_col_candidates=("날짜","date","Date")) -> pd.DataFrame:
     """Make sure dataframe has a DatetimeIndex named 'date'."""
     if df is None or len(df)==0:

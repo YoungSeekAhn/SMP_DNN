@@ -67,6 +67,7 @@ class BranchLSTM(nn.Module):
         _, (h, _) = self.lstm(x)
         return h[-1]
 
+
 class MultiInputLSTM(nn.Module):
     def __init__(self, p_dim, f_dim, d_dim, hidden=96, layers=1, head_hidden=128, out_dim=1, dropout=0.2):
         super().__init__()

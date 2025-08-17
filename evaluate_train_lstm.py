@@ -64,6 +64,7 @@ def evaluate(model, loader, device, target_kind="logr"):
     rmse=math.sqrt(((P-Y)**2).mean()); mae=np.abs(P-Y).mean()
     return total/max(1,n), {"rmse":rmse,"mae":mae}, Y, P
 
+
 def per_horizon(Y,P):
     H=Y.shape[1]
     rmse=[math.sqrt(((P[:,h]-Y[:,h])**2).mean()) for h in range(H)]

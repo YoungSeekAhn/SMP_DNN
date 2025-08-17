@@ -18,6 +18,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 
+
 # ========= 설정 =========
 Code = "005930"
 BATCH_SIZE = 256

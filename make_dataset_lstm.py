@@ -15,6 +15,7 @@ class SplitConfig:
     val_ratio: float = 0.2
     test_ratio: float = 0.2
 
+
 @dataclass
 class DSConfig:
     code: str = "005930"

@@ -34,6 +34,7 @@ def build_model_from_loader(loader, hidden=64, layers=1, head_hidden=128, dropou
     return model, out_dim
 
 
+
 def main():
     # 0) 체크포인트 경로
     ckpt_path = Path("models") / f"{Code}_best.pt"

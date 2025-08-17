@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 from datetime import datetime, timedelta
 
+
 @dataclass
 class SplitConfig:
     train_ratio: float = 0.7
