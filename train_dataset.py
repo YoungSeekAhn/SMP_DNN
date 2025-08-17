@@ -102,7 +102,7 @@ model = MultiInputLSTM(p_dim=P, f_dim=Q, d_dim=R,
 # 손실/최적화
 target_kind = meta.get("target_kind", "logr")
 criterion = nn.BCEWithLogitsLoss() if target_kind == "direction" else nn.MSELoss()
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-5)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", patience=3, factor=0.5)
 
 # 평가 함수

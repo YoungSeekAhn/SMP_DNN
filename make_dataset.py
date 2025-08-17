@@ -2,7 +2,7 @@ from dataset_functions import add_multi_targets, time_split, auto_feature_config
 from dataset_functions import MultiInputTSDataset, PipelineConfig, SplitConfig
 import pandas as pd
 from pathlib import Path
-import os
+import pickle, os
 
 Code = "005930"
 out_dir = Path.cwd()
@@ -11,7 +11,7 @@ merged = pd.read_csv(filepath, index_col=0, parse_dates=True)
 
 # target kind can be "logr", "pct", or "close"
 cfg = PipelineConfig()
-cfg.lookback = 20 # Lookback period for the model
+cfg.lookback = 30 # Lookback period for the model
 cfg.horizons = [1, 2, 3] # Prediction horizon (3 days ahead)
 cfg.target_kind = "logr"  # or "pct", or "close"
 cfg.split = SplitConfig(train_ratio=0.6, val_ratio=0.2, test_ratio=0.2)
@@ -32,6 +32,12 @@ tr_s = apply_scalers(tr, scalers, feat)
 va_s = apply_scalers(va, scalers, feat)
 te_s = apply_scalers(te, scalers, feat)
 
+# (2) 저장: 나중에 평가/그래프 복원 때 재사용
+
+os.makedirs("artifacts", exist_ok=True)
+with open("artifacts/scalers.pkl", "wb") as f:
+    pickle.dump(scalers, f)
+    
 # 6) windows
 Xp_tr, Xf_tr, Xd_tr, y_tr = build_windows(tr_s, feat, lookback=cfg.lookback, horizons=cfg.horizons)
 Xp_va, Xf_va, Xd_va, y_va = build_windows(va_s, feat, lookback=cfg.lookback, horizons=cfg.horizons)
