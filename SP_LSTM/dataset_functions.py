@@ -12,6 +12,24 @@ from pykrx import stock
 # -----------------------------
 # 1) Standardize & Merge
 # -----------------------------
+def is_trading_day(yyyymmdd: str, ticker: str = "005930") -> bool:
+    """해당 날짜가 거래일인지 여부 반환 (티커 일봉 데이터 존재 여부로 판단)."""
+    df = stock.get_market_ohlcv_by_date(yyyymmdd, yyyymmdd, ticker)
+    return df is not None and len(df) > 0
+
+def last_trading_day(ref: datetime | None = None) -> str:
+    """
+    기준일(ref) 포함하여, 가장 최근 거래일 'YYYYMMDD' 반환.
+    ref가 None이면 오늘 기준.
+    """
+    if ref is None:
+        ref = datetime.today()
+    d = ref
+    while True:
+        ymd = d.strftime("%Y%m%d")
+        if is_trading_day(ymd):
+            return ymd
+        d -= timedelta(days=1)
         
 def _ensure_datetime_index(df: pd.DataFrame, date_col_candidates=("날짜","date","Date")) -> pd.DataFrame:
     """Make sure dataframe has a DatetimeIndex named 'date'."""

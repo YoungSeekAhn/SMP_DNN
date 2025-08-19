@@ -2,55 +2,75 @@
 from dataclasses import dataclass, field
 from typing import List, Optional
 from datetime import datetime, timedelta
+from pykrx import stock
 
+
+Stock_Name = "LG전자"  # 종목 이름
+
+# 전체 종목 리스트 (코드와 이름)
+tickers = stock.get_market_ticker_list(market="ALL")  # KOSPI, KOSDAQ 모두
+mapping = {stock.get_market_ticker_name(t): t for t in tickers}
+
+Stock_Code = mapping[Stock_Name]
+
+if not Stock_Code:
+    raise ValueError(f"종목 이름 '{Stock_Name}'에 해당하는 종목 코드가 없습니다. 종목 이름을 확인하세요.")
+
+def is_trading_day(yyyymmdd: str, ticker: str = "005930") -> bool:
+    """해당 날짜가 거래일인지 여부 반환 (티커 일봉 데이터 존재 여부로 판단)."""
+    df = stock.get_market_ohlcv_by_date(yyyymmdd, yyyymmdd, ticker)
+    return df is not None and len(df) > 0
+
+def last_trading_day(ref: datetime | None = None) -> str:
+    """
+    기준일(ref) 포함하여, 가장 최근 거래일 'YYYYMMDD' 반환.
+    ref가 None이면 오늘 기준.
+    """
+    if ref is None:
+        ref = datetime.today()
+    d = ref
+    while True:
+        ymd = d.strftime("%Y%m%d")
+        if is_trading_day(ymd):
+            return ymd
+        d -= timedelta(days=1)
+
+# 시작일과 종료일 자동 설정   
+Duration = 365 * 2  # 데이터 기간 (일수)     
+End_Date = last_trading_day()
+Start_Date = (datetime.strptime(End_Date, "%Y%m%d") - timedelta(days=Duration)).strftime("%Y%m%d")
 
 @dataclass
 class SplitConfig:
     train_ratio: float = 0.7
     val_ratio: float = 0.15  # test_ratio는 1 - train - val
     shuffle: bool = False    # 시계열이라 보통 False 권장
-
+    
 @dataclass
 class DSConfig:
-    # 필수
-    code: str                 # 예: "005930" (삼성전자)
-    lookback: int             # 예: 60
-    horizons: List[int]       # 예: [1, 5, 20, 60]
-    target_kind: str          # "close" or "return"
-
-    # 데이터 기간 (YYYYMMDD). None이면: Start=오늘 기준 마지막 거래일, End=2년 전
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
-
-    # 스플릿
+    name: str = Stock_Name       # 종목 이름
+    code: str = Stock_Code   # 종목 코드 (자동설정)
+    
+    duration: int = Duration  # 데이터 기간 (일수)
+    start_date: str = Start_Date  # 자동 결정 (예: "20220101")
+    end_date: str = End_Date    # 자동 결정 (예: "20231231")
+    
+    # 데이터 관련 설정
+    lookback: int = 30     # 과거 데이터 길이 (일수)
+    horizons: List[int] = (1, 2, 5)  # 예측 시점 (1일, 2일, 5일 뒤)
+    target_kind: str = "logr"   # 타겟 종류: "logr", "pct", "close"
+    
+    # 분할 설정    
     split: SplitConfig = field(default_factory=SplitConfig)
 
     # 저장 경로
     out_dir: str = "./artifacts"
+    getdata_dir: str = "./csvdata"
 
-    def ensure_dates(self):
-        """start_date(최근 거래일), end_date(2년 전) 자동 보정"""
-        if self.start_date is None or self.end_date is None:
-            from pykrx import stock
-            from datetime import datetime, timedelta
-
-            # 마지막 거래일 찾기 (지수 1001로 확인해도 됨)
-            def is_trading_day(ymd: str, ticker: str = "005930") -> bool:
-                df = stock.get_market_ohlcv_by_date(ymd, ymd, ticker)
-                return df is not None and len(df) > 0
-
-            d = datetime.today()
-            while True:
-                ymd = d.strftime("%Y%m%d")
-                if is_trading_day(ymd, self.code):
-                    last = ymd
-                    break
-                d -= timedelta(days=1)
-
-            two_years_ago = (datetime.strptime(last, "%Y%m%d") - timedelta(days=365*2)).strftime("%Y%m%d")
-
-            if self.start_date is None:
-                self.start_date = two_years_ago
-                self.end_date   = last
-            elif self.end_date is None:
-                self.end_date = last
+@dataclass
+class FeatureConfig:
+    price_cols: List[str] = ("open", "high", "low", "close", "volume", "chg_pct")
+    flow_cols: List[str] = ("inst_sum", "inst_ext", "retail", "foreign")
+    fund_cols: List[str] = ("per", "pbr", "div")
+    #fund_cols: List[str] = ("per", "pbr", "div", "bps", "eps", "dps")
+    

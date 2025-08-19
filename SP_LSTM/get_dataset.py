@@ -1,18 +1,23 @@
-import numpy as np
-import pandas as pd
-from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional
-from sklearn.preprocessing import StandardScaler
-import torch
-from torch.utils.data import Dataset, DataLoader
-from dataclasses import dataclass, field
+import os
+os.environ.pop("MPLBACKEND", None)  # 환경변수 꼬임 방지 (옵션)
+
+import matplotlib
+matplotlib.use("TkAgg")   # 또는 "QtAgg" (PyQt5/PySide6 설치 필요)
+import matplotlib.pyplot as plt
+
 from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
+from pathlib import Path
+
+import pandas as pd
+import numpy as np
 from pykrx import stock
 
-# -----------------------------
-# 1) Standardize & Merge
-# -----------------------------
-        
+from DSConfig import FeatureConfig
+
+# # 마지막 거래일 기준으로 시작일과 종료일 설정
+# # 시작일은 마지막 거래일로부터 2년 전으로 설정
+
 def _ensure_datetime_index(df: pd.DataFrame, date_col_candidates=("날짜","date","Date")) -> pd.DataFrame:
     """Make sure dataframe has a DatetimeIndex named 'date'."""
     if df is None or len(df)==0:
@@ -36,7 +41,7 @@ def _ensure_datetime_index(df: pd.DataFrame, date_col_candidates=("날짜","date
     except Exception:
         raise ValueError("No datetime index or date column found. Provide a date column named one of: %s" % (date_col_candidates,))
 
-def _standardize_ohlcv(ohlcv: pd.DataFrame,price_cols: List[str]) -> pd.DataFrame:
+def _standardize_ohlcv(ohlcv: pd.DataFrame,price_cols) -> pd.DataFrame:
     if ohlcv is None or len(ohlcv)==0:
         return ohlcv
     df = _ensure_datetime_index(ohlcv)
@@ -54,7 +59,7 @@ def _standardize_ohlcv(ohlcv: pd.DataFrame,price_cols: List[str]) -> pd.DataFram
         df[c] = pd.to_numeric(df[c], errors="coerce")
     return df
 
-def _standardize_investor(value_df: pd.DataFrame, flow_cols: List[str]) -> pd.DataFrame:
+def _standardize_investor(value_df: pd.DataFrame, flow_cols) -> pd.DataFrame:
     """Select key investor groups and rename to english. Falls back if some missing."""
     if value_df is None or len(value_df)==0:
         return value_df
@@ -90,7 +95,7 @@ def _standardize_investor(value_df: pd.DataFrame, flow_cols: List[str]) -> pd.Da
         df_sel[c] = pd.to_numeric(df_sel[c], errors="coerce")
     return df_sel
 
-def _standardize_fundamental(fund_df: pd.DataFrame, fund_cols: List[str]) -> pd.DataFrame:
+def _standardize_fundamental(fund_df: pd.DataFrame, fund_cols) -> pd.DataFrame:
     if fund_df is None or len(fund_df)==0:
         return fund_df
     df = _ensure_datetime_index(fund_df)
@@ -140,7 +145,108 @@ def merge_sources(ohlcv: pd.DataFrame, investor: pd.DataFrame, fund: pd.DataFram
     return out
 
 
+def get_dataset(cfg, SAVE_CSV_FILE=True, PLOT_ROLLING=True) -> pd.DataFrame:
+    """
+    Fetches and merges stock data from KRX, including OHLCV, investor trading values, and fundamentals.
+    
+    Args:
+        cfg (config): Configuration object with dataset parameters.
+        feature (FeatureConfig): Feature configuration for column names.
+    
+    Returns:
+        pd.DataFrame: Merged DataFrame with standardized columns.
+    """
+    feature = FeatureConfig()
+
+    Start_Date = cfg.start_date
+    End_Date = cfg.end_date
+    Code = cfg.code  # 종목 코드
+
+    print(f"Stock Name: {cfg.name}, Code: {Code} /n")
+    print(f"Start Day: {Start_Date}, End Day: {End_Date}")
+
+    # # 1) Fetch OHLCV data
+    OHLCV_df = stock.get_market_ohlcv(Start_Date, End_Date, Code)
+    OHLCV_df = _standardize_ohlcv(OHLCV_df, feature.price_cols)
+    
+    # # 2) Fetch investor trading values
+    Investor_df = stock.get_market_trading_value_by_date(Start_Date, End_Date, Code)
+    Investor_df = _standardize_investor(Investor_df, feature.flow_cols)
+
+    # # 3) Fetch fundamental data
+    Fund_df = stock.get_market_fundamental(Start_Date, End_Date, Code)
+    Fund_df = _standardize_fundamental(Fund_df, feature.fund_cols)
+
+    # # 4) Merge all sources
+    merge_df = merge_sources(OHLCV_df, Investor_df, Fund_df)
 
 
+    # 8) (선택) rolling h=1 경로
+    if SAVE_CSV_FILE:
+        print(merge_df.head())
+        get_dir = Path(cfg.getdata_dir)
+        get_dir.mkdir(exist_ok=True, parents=True)
+        filepath = os.path.join(get_dir, f"{cfg.name}({cfg.code})_{cfg.end_date}.csv")
+        merge_df.to_csv(filepath, index=True)
+
+    if PLOT_ROLLING:
+        # Plot rolling averages and other features
+        if merge_df.empty:
+            raise ValueError("Merged DataFrame is empty. Please check the data sources.")
+        
+        plot_rolling_features(merge_df, cfg, feature)
+    
+    return merge_df
+
+def plot_rolling_features(merge_df: pd.DataFrame, cfg, feature: FeatureConfig):
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+
+    # (1) 주가
+    close = merge_df['close']
+    if close.empty:
+        raise ValueError("Close price data is empty. Please check the data source.")
+    axes[0].plot(close.index, close, label="close", color="black")
+    axes[0].plot(close.rolling(1).mean(), label="MA1", linestyle="--")
+    axes[0].plot(close.rolling(5).mean(), label="MA5", linestyle="--")
+    axes[0].plot(close.rolling(20).mean(), label="MA20", linestyle="--")
+    axes[0].plot(close.rolling(60).mean(), label="MA60", linestyle="--")
+
+    axes[0].set_title(f"{cfg.name} ({cfg.code}) 종가 with Moving Averages")
+    axes[0].set_ylabel("Price")
+    axes[0].legend()
+    axes[0].grid(True)
+
+    # (2) 수급주체
+
+    #수급주체별 20일 이동평균을 플로팅
+    #investor_cols : merge_df 안에서 수급주체별 컬럼명 리스트
+    Investor_colums = [col for col in merge_df.columns if col in feature.flow_cols]
+    for col in Investor_colums:
+        if col in Investor_colums:
+            axes[1].plot(
+                merge_df.index, 
+                merge_df[col].rolling(20).mean(), 
+                label=f"{col} 20MA"
+            )
+    axes[1].set_title(f"{cfg.name} ({cfg.code}) Investor Trading Value (20-day Moving Average)")
+    axes[1].set_ylabel("Trading Value")
+    axes[1].legend()
+    axes[1].grid(True)
 
 
+    # (3) PER / PBR
+    per = merge_df['per']
+    pbr = merge_df['pbr']
+    if per.empty or pbr.empty:
+        raise ValueError("PER or PBR data is empty. Please check the data source.")
+    axes[2].plot(per.rolling(20).mean(), label="PER MA20", color="blue")
+    axes[2].plot(pbr.rolling(20).mean()*10, label="PBR MA20 (Scale *10)", color="red")
+    axes[2].set_title(f"{cfg.name} ({cfg.code}) PER / PBR 추이")
+    axes[2].set_ylabel("값")
+    axes[2].legend()
+    axes[2].grid(True)
+
+    # 전체 스타일
+    plt.xlabel("날짜")
+    plt.tight_layout()
+    plt.show()
