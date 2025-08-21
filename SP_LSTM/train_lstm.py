@@ -8,22 +8,54 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import pickle
 from DSConfig import DSConfig
+from report_predic import report_predictions
 import os
 
 # ---------------- Dataset ----------------
-class MIDataset(Dataset):
-    def __init__(self, Xp, Xf, Xd, Y):
-        self.Xp, self.Xf, self.Xd, self.Y = Xp, Xf, Xd, Y
-    def __len__(self): return len(self.Y)
-    def __getitem__(self, idx):
-        return {
-            "x_price": torch.from_numpy(self.Xp[idx]),
-            "x_flow":  torch.from_numpy(self.Xf[idx]),
-            "x_fund":  torch.from_numpy(self.Xd[idx]),
-            "y":       torch.from_numpy(self.Y[idx]),
-        }
 
+class MIDataset(Dataset):
+    def __init__(self, Xp, Xf, Xd, Y, base_dates=None):
+        # 타입/형상 정리
+        self.Xp = np.asarray(Xp, dtype=np.float32)  # (N, L, Pp)
+        self.Xf = np.asarray(Xf, dtype=np.float32)  # (N, L, Pf)
+        self.Xd = np.asarray(Xd, dtype=np.float32)  # (N, L, Pd)
+        self.Y  = np.asarray(Y,  dtype=np.float32)  # (N, H)
+
+        N = self.Y.shape[0]
+        assert self.Xp.shape[0] == N and self.Xf.shape[0] == N and self.Xd.shape[0] == N, "N mismatch"
+        assert self.Xp.shape[1] == self.Xf.shape[1] == self.Xd.shape[1], "lookback (L) mismatch"
+
+        # 날짜 처리: (N,) 또는 (N, L) -> (N,) 윈도우 끝 날짜
+        self.base_dates = None
+        if base_dates is not None:
+            bd = np.asarray(base_dates)
+            if bd.ndim == 2:           # (N, L)이라면 마지막(윈도우 끝) 날짜 사용
+                bd = bd[:, -1]
+            if bd.shape[0] != N:
+                raise ValueError(f"base_dates length {bd.shape[0]} != N {N}")
+
+            # 안전 파싱 -> tz-naive -> ISO 문자열 리스트
+            bd = pd.to_datetime(bd, errors="coerce", utc=True).tz_convert(None)
+            if bd.isna().any():
+                raise ValueError("base_dates contains NaT after parsing.")
+            self.base_dates = [ts.isoformat() for ts in bd.to_pydatetime()]
+
+    def __len__(self):
+        return len(self.Y)
+
+    def __getitem__(self, idx):
+        item = {
+            "x_price": torch.from_numpy(self.Xp[idx]),  # (L, Pp)
+            "x_flow":  torch.from_numpy(self.Xf[idx]),  # (L, Pf)
+            "x_fund":  torch.from_numpy(self.Xd[idx]),  # (L, Pd)
+            "y":       torch.from_numpy(self.Y[idx]),   # (H,)
+        }
+        if self.base_dates is not None:
+            item["base_date"] = self.base_dates[idx]   # 'YYYY-MM-DDTHH:MM:SS'
+        return item
+    
 # ---------------- Auto batch size ----------------
 def auto_bs(n, base=128):
     if n >= base: return base
@@ -96,15 +128,23 @@ def train(model, cfg, device, criterion, train_loader, val_loader, num_epochs):
     for epoch in range(1, num_epochs+1):
         model.train(); total=0; n=0
         print(f"\nEpoch {epoch}/{num_epochs}")
+        
         pbar=tqdm(train_loader, desc="Training", leave=False)
         for b in pbar:
             xp=b["x_price"].to(device); xf=b["x_flow"].to(device); xd=b["x_fund"].to(device)
             y=b["y"].to(device)
+            
             optimizer.zero_grad(set_to_none=True)
-            p=model(xp,xf,xd); loss=criterion(p,y)
-            loss.backward(); nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            p=model(xp,xf,xd)
+            
+            loss=criterion(p,y)
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
-            total+=loss.item()*y.size(0); n+=y.size(0)
+            
+            total+=loss.item()*y.size(0)
+            n+=y.size(0)
+            
             pbar.set_postfix({"batch_loss": f"{loss.item():.4f}"})
 
         tr_loss=total/max(1,n)
@@ -137,17 +177,21 @@ def training_LSTM(payload, cfg, LOAD_DATASET_FILE = True, TRAIN_PLOT = True):
         payload_path = os.path.join(get_dir, f"{cfg.name}({cfg.code})_{cfg.end_date}.pkl")
         payload = pd.read_pickle(payload_path)
 
-    Xp_tr, Xf_tr, Xd_tr, Y_tr = payload["Xp_tr"], payload["Xf_tr"], payload["Xd_tr"], payload["Y_tr"]
-    Xp_va, Xf_va, Xd_va, Y_va = payload["Xp_va"], payload["Xf_va"], payload["Xd_va"], payload["Y_va"]
-    Xp_te, Xf_te, Xd_te, Y_te = payload["Xp_te"], payload["Xf_te"], payload["Xd_te"], payload["Y_te"]
+    Xdate_tr, Xp_tr, Xf_tr, Xd_tr, Y_tr = payload["Xdate_tr"], payload["Xp_tr"], payload["Xf_tr"], payload["Xd_tr"], payload["Y_tr"]
+    Xdate_va, Xd_va, Xp_va, Xf_va, Xd_va, Y_va = payload["Xdate_va"], payload["Xd_va"], payload["Xp_va"], payload["Xf_va"], payload["Xd_va"], payload["Y_va"]
+    Xdate_te, Xp_te, Xf_te, Xd_te, Y_te = payload["Xdate_te"], payload["Xp_te"], payload["Xf_te"], payload["Xd_te"], payload["Y_te"]
+    #Date_te = payload["Date_te"]  # Test 날짜 (테스트용)
 
-    ds_tr = MIDataset(Xp_tr, Xf_tr, Xd_tr, Y_tr)
-    ds_va = MIDataset(Xp_va, Xf_va, Xd_va, Y_va)
-    ds_te = MIDataset(Xp_te, Xf_te, Xd_te, Y_te)
-
-    train_loader = DataLoader(ds_tr, batch_size=auto_bs(len(ds_tr)), shuffle=False, drop_last=False)
-    val_loader   = DataLoader(ds_va, batch_size=auto_bs(len(ds_va)), shuffle=False, drop_last=False)
-    test_loader  = DataLoader(ds_te, batch_size=auto_bs(len(ds_te)), shuffle=False, drop_last=False)
+    # ---- Dataset 생성 (날짜 포함)
+    ds_tr = MIDataset(Xp_tr, Xf_tr, Xd_tr, Y_tr, Xdate_tr)
+    ds_va = MIDataset(Xp_va, Xf_va, Xd_va, Y_va, Xdate_va)
+    ds_te = MIDataset(Xp_te, Xf_te, Xd_te, Y_te, Xdate_te)
+    
+    print(f"Train dataset size: {len(ds_tr)} | Val dataset size: {len(ds_va)} | Test dataset size: {len(ds_te)}")
+    
+    train_loader = DataLoader(ds_tr, batch_size=cfg.batch_size, shuffle=False, drop_last=False)
+    val_loader   = DataLoader(ds_va, batch_size=cfg.batch_size, shuffle=False, drop_last=False)
+    test_loader  = DataLoader(ds_te, batch_size=cfg.batch_size, shuffle=False, drop_last=False)
     
     sample = ds_tr[0]
     P = sample["x_price"].shape[-1]
@@ -178,4 +222,6 @@ def training_LSTM(payload, cfg, LOAD_DATASET_FILE = True, TRAIN_PLOT = True):
         axes[1].plot(history["val_rmse"], label="Val RMSE"); axes[1].plot(history["val_mae"], label="Val MAE")
         axes[1].set_title("Val Errors"); axes[1].legend(); axes[1].grid(True)
         plt.tight_layout();
-        plt.show()
+        
+    report_predictions(model, test_loader, device, cfg)
+    print("Training and evaluation completed successfully.")

@@ -15,22 +15,26 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import os
-from DSConfig import DSConfig
-from train_dataset_lstm import MIDataset, MultiInputLSTM
+from DSConfig import DSConfig, FeatureConfig
+from pandas.tseries.offsets import BDay
+# from train_lstm import MIDataset, MultiInputLSTM
 
     # 1) 데이터/메타 로드
-cfg = DSConfig()
+
+feature = FeatureConfig()
+
 
 # ========== 설정 ==========
 BATCH_SIZE = 128
 ROLLING_H1_PLOT = True   # h=1 연속 경로 추가로 그릴지
 # =========================
 
-def build_model_from_shapes(Xp, Xf, Xd, Y, device):
-    P = Xp.shape[-1]; F = Xf.shape[-1]; D = Xd.shape[-1]; H = Y.shape[-1]
-    m = MultiInputLSTM(P, F, D, hidden=96, layers=1, head_hidden=128, out_dim=H, dropout=0.2).to(device)
-    return m
+# def build_model_from_shapes(Xp, Xf, Xd, Y, device):
+#     P = Xp.shape[-1]; F = Xf.shape[-1]; D = Xd.shape[-1]; H = Y.shape[-1]
+#     m = MultiInputLSTM(P, F, D, hidden=96, layers=1, head_hidden=128, out_dim=H, dropout=0.2).to(device)
+#     return m
 
 
 # ===== 헬퍼 =====
@@ -56,6 +60,8 @@ def to_growth(arr: np.ndarray, target_kind: str) -> np.ndarray:
 
 
 # ===== horizon 정렬 시계열 (예측/실제 모두 생성) =====
+# 멀티-호라이즌 (N,H) 예측/실제 행렬을 시계열 축에 정렬한 1D 시리즈 사전으로 변환하는 함수.
+
 def build_aligned_series_from_base(
     preds: np.ndarray,     # (N, H)
     trues: np.ndarray,     # (N, H)
@@ -131,40 +137,25 @@ def reconstruct_rolling_h1_path(
         raise ValueError("invalid target_kind")
 
 
-def main():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def report_predictions(model, test_loader, device, cfg):
+    
+# # ---------------- Load payload ----------------
+#     get_dir = Path(cfg.dataset_dir)
+#     payload_path = os.path.join(get_dir, f"{cfg.name}({cfg.code})_{cfg.end_date}.pkl")
+#     payload = pd.read_pickle(payload_path)
 
-# ---------------- Load payload ----------------
-    get_dir = Path(cfg.dataset_dir)
-    payload_path = os.path.join(get_dir, f"{cfg.name}({cfg.code})_{cfg.end_date}.pkl")
-    payload = pd.read_pickle(payload_path)
-
-    meta = payload["meta"]
-    feat = meta["feature_config"]
-    lookback = meta["lookback"]
-    horizons = meta["horizons"]
-    target_kind = meta["target_kind"]
-
-
-    # 2) Test loader 구성
-    ds_te = MIDataset(payload["Xp_te"], payload["Xf_te"], payload["Xd_te"], payload["Y_te"])
-    test_loader = DataLoader(ds_te, batch_size=BATCH_SIZE, shuffle=False)
-
-    # 3) 모델 복원
-    model = build_model_from_shapes(payload["Xp_tr"], payload["Xf_tr"], payload["Xd_tr"], payload["Y_tr"], device)
-    model_dir = Path(cfg.model_dir)
-    model_path = os.path.join(model_dir, f"{cfg.name}({cfg.code})_{cfg.end_date}.pt")
-    assert os.path.exists(model_path), f"[ERR] model not found: {model_path}"
-    print(f"Loading model from: {model_path}")
-    ckpt = torch.load(model_path, map_location=device)
-    model.load_state_dict(ckpt["model"]); model.eval()
-    target_kind = ckpt.get("target_kind", target_kind)  # ckpt 우선
-
+#     meta = payload["meta"]
+    feat = feature
+#     lookback = meta["lookback"]
+    horizons = cfg.horizons
+    target_kind = cfg.target_kind
+      
     # 4) 스케일러 로드 (price 역스케일)
     scalers_path = Path("artifacts") / "scalers.pkl"
     assert scalers_path.exists(), f"[ERR] scalers not found: {scalers_path}"
     with open(scalers_path, "rb") as f:
         scalers = pickle.load(f)
+        
     # 브랜치 스케일러/컬럼 추출
     price_pack   = scalers.get("price", {})
     price_scaler = price_pack.get("scaler", None)
@@ -174,75 +165,120 @@ def main():
     if price_cols:
         close_idx = price_cols.index("close") if "close" in price_cols else 3
     else:
-        close_idx = get_close_idx(feat)  # 당신이 이미 만든 함수
+        close_idx = get_close_idx(feat)  
 
-    # 5) 예측/정답 & base_closes 수집 (배치 순서 그대로)
+    # 5) 예측/정답 & base_closes & base_dates 수집 (배치 순서 그대로)
     Ys, Ps, base_closes_list = [], [], []
+    base_dates_list = []   # ← 테스트 로더에서 날짜 수집
+
     with torch.no_grad():
         for b in test_loader:
             # 예측
             p = model(b["x_price"].to(device),
-                      b["x_flow"].to(device),
-                      b["x_fund"].to(device))
+                    b["x_flow"].to(device),
+                    b["x_fund"].to(device))
             Ps.append(p.cpu().numpy())
             Ys.append(b["y"].numpy())
 
-            # 전일 종가(입력 마지막 close) 역스케일 수집
+            # 마지막 타임스텝 close 역스케일
             x_last = b["x_price"][:, -1, :].cpu().numpy()  # (B, P)
-            
             if price_scaler is not None and hasattr(price_scaler, "inverse_transform"):
-                # 전체 역변환이 가장 안전 (컬럼 순서가 fit과 동일해야 함)
                 try:
                     inv_all = price_scaler.inverse_transform(x_last)      # (B, P)
                     base_closes_list.append(inv_all[:, close_idx])        # (B,)
                 except Exception:
-                    # 실패 시 close 단일 컬럼만 역변환 시도
                     inv_close = price_scaler.inverse_transform(x_last[:, close_idx:close_idx+1])
                     base_closes_list.append(inv_close.ravel())
             else:
-                # 스케일러 없으면 스케일된 값을 그대로 사용 (주의)
                 base_closes_list.append(x_last[:, close_idx])
 
-    P = np.concatenate(Ps, axis=0)        # (N, H)
-    Y = np.concatenate(Ys, axis=0)        # (N, H)
-    base_closes = np.concatenate(base_closes_list, axis=0)  # (N,)
+            # ← 날짜 수집: MIDataset에서 ISO 문자열로 넘어오도록 해두었음
+            if "base_date" in b:
+                # b["base_date"]는 list[str] (DataLoader default_collate)
+                base_dates_list.extend(b["base_date"])
+
+    P = np.concatenate(Ps, axis=0)        # (N_pred, H)
+    Y = np.concatenate(Ys, axis=0)        # (N_pred, H)
+    base_closes = np.concatenate(base_closes_list, axis=0)  # (N_pred,)
     assert P.shape == Y.shape, "Pred/True shape mismatch"
 
-    # 6) 초기 P0 (rolling h=1용; 첫 배치 첫 샘플의 전일 close)
-    P0 = float(base_closes[0])
-    print(f"P0 (initial close): {P0:.4f} | target_kind={target_kind} | horizons={horizons}")
+    # ---- 날짜: test_loader에서 수집한 기준일을 그대로 사용 ----
+    base_dates = pd.to_datetime(base_dates_list, errors="coerce", utc=True).tz_convert(None)
+    if base_dates.isna().any():
+        raise ValueError("base_date에 파싱되지 않는 값(NaT)이 있습니다.")
 
-    # 7) 정렬된(Aligned) 절대가격 곡선 (예측 vs 실제)
+    # 길이 불일치 방어 (drop_last 등으로)
+    N_pred = P.shape[0]
+    if len(base_dates) != N_pred:
+        N_eff = min(N_pred, len(base_dates))
+        print(f"[WARN] 날짜/예측 길이 불일치: dates={len(base_dates)}, preds={N_pred} → {N_eff}로 맞춥니다.")
+        P, Y, base_closes, base_dates = P[:N_eff], Y[:N_eff], base_closes[:N_eff], base_dates[:N_eff]
+        N_pred = N_eff
+
+    h_max = max(cfg.horizons)
+
+    # x축 날짜: 마지막 기준일 뒤로 h_max 영업일까지 확장
+    x_dates = base_dates if h_max == 0 else base_dates.append(
+        pd.bdate_range(base_dates[-1] + BDay(1), periods=h_max)
+    )
+    # ----- 정렬 곡선 생성 -----
+    P0 = float(base_closes[0])
     aligned_pred, aligned_true = build_aligned_series_from_base(
         preds=P, trues=Y, base_closes=base_closes,
-        horizons=horizons, target_kind=target_kind
+        horizons=cfg.horizons, target_kind=cfg.target_kind
     )
 
-   
-    for h in horizons:
+    # ----- 플롯 (실제는 있는 구간만, 미래 구간은 예측만) -----
+    # 필요 시 특정 horizon만 선택: use_h = [1,2,5]
+    use_h = list(cfg.horizons)
+
+    # x_dates 길이 부족하면 확장
+    need_len = N_pred + max(use_h)
+    if len(x_dates) < need_len:
+        extra = pd.bdate_range(x_dates[-1] + BDay(1), periods=need_len - len(x_dates))
+        x_dates = x_dates.append(extra)
+
+    for h in use_h:
+        y_true = aligned_true[h]   # 길이 = need_len, 미래 구간은 NaN일 수 있음
+        y_pred = aligned_pred[h]
+
+        m_true = ~np.isnan(y_true)  # 실제값 존재 구간
+        m_pred = ~np.isnan(y_pred)  # 예측값 존재 구간
+
         plt.figure(figsize=(13, 5))
-        plt.plot(aligned_true[h], marker='o', linestyle="--", alpha=0.7, label=f"True h={h}")
-        plt.plot(aligned_pred[h], marker='o', alpha=0.9, label=f"Pred h={h}")
-        plt.title(f"[Aligned] Absolute Price by Horizon (Code={cfg.code}, target={target_kind})")
-        plt.xlabel("Test timeline index")
-        plt.ylabel("Price")
+        # 예측: 전체 유효 구간
+        plt.plot(x_dates[m_pred], y_pred[m_pred], marker='o', alpha=0.9, label=f"Pred +{h}d")
+        # 실제: 존재 구간만 (미래 구간은 자동 미표시)
+        if m_true.any():
+            plt.plot(x_dates[m_true], y_true[m_true], marker='o', linestyle="--", alpha=0.7, label=f"True +{h}d")
+
+        # x축 포맷
+        ax = plt.gca()
+        loc = mdates.AutoDateLocator()
+        ax.xaxis.set_major_locator(loc)
+        ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(loc))
+        plt.title(f"Absolute Price – +{h}B (Code={cfg.code}, target={cfg.target_kind})")
+        plt.xlabel("Date"); plt.ylabel("Price")
         plt.grid(True); plt.legend(ncol=2); plt.tight_layout()
 
-
-    # 8) (선택) rolling h=1 경로
+    # (선택) rolling h=1 도 날짜로 보고 싶다면:
     if ROLLING_H1_PLOT:
         t, price_true_roll, price_pred_roll = reconstruct_rolling_h1_path(
-            preds=P, trues=Y, P0=P0, horizons=horizons, target_kind=target_kind
+            preds=P, trues=Y, P0=P0, horizons=cfg.horizons, target_kind=cfg.target_kind
         )
+        # t가 정수 인덱스라면 날짜로 치환 가능
+        x_dates_roll = x_dates[t]
         plt.figure(figsize=(12, 5))
-        plt.plot(t[:6], price_true_roll[:6], label="Actual (rolling h=1)", marker = 'o', linestyle="--", alpha=0.8)
-        plt.plot(t[:6], price_pred_roll[:6], label="Predicted (rolling h=1)", marker = 'o', alpha=0.9)
-        plt.title(f"[Rolling h=1] Absolute Price Path (Code={cfg.code}, target={target_kind})")
-        plt.xlabel("Test steps"); plt.ylabel("Price")
+        plt.plot(x_dates_roll[:6], price_true_roll[:6], label="Actual (rolling h=1)",
+                 marker='o', linestyle="--", alpha=0.8)
+        plt.plot(x_dates_roll[:6], price_pred_roll[:6], label="Predicted (rolling h=1)",
+                 marker='o', alpha=0.9)
+        plt.title(f"[Rolling h=1] Absolute Price Path (Code={cfg.code}, target={cfg.target_kind})")
+        plt.xlabel("Date"); plt.ylabel("Price")
+        ax = plt.gca()
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+        ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(ax.xaxis.get_major_locator()))
         plt.grid(True); plt.legend(); plt.tight_layout()
-        
+
     plt.show()
 
-
-if __name__ == "__main__":
-    main()

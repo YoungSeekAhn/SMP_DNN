@@ -42,9 +42,9 @@ from pykrx import stock
 
 @dataclass
 class SplitConfig:
-    train_ratio: float = 0.6
-    val_ratio: float = 0.2  # test_ratio는 1 - train - val
-    test_ratio: float = 0.2
+    train_ratio: float = 0.7
+    val_ratio: float = 0.15  # test_ratio는 1 - train - val
+    test_ratio: float = 0.15
     shuffle: bool = False    # 시계열이라 보통 False 권장
     
 @dataclass
@@ -63,7 +63,7 @@ class DSConfig:
     
     ## 분할 설정    
     #split: SplitConfig = field(default_factory=SplitConfig)
-
+    batch_size: int = 32  # 배치 크기
     # 저장 경로
     dataset_dir: str = "./datasets"  # 데이터셋 저장 디렉토리
     getdata_dir: str = "./csvdata"
@@ -73,8 +73,10 @@ config = DSConfig()
 
 @dataclass
 class FeatureConfig:
+    date_cols: List[str] = ("date")
     price_cols: List[str] = ("open", "high", "low", "close", "volume", "chg_pct")
     flow_cols: List[str] = ("inst_sum", "inst_ext", "retail", "foreign")
     fund_cols: List[str] = ("per", "pbr", "div")
     #fund_cols: List[str] = ("per", "pbr", "div", "bps", "eps", "dps")
-    
+
+feature = FeatureConfig()

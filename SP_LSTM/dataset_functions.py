@@ -126,9 +126,11 @@ def _standardize_fundamental(fund_df: pd.DataFrame, fund_cols: List[str]) -> pd.
     df = df.sort_index().ffill()
     return df
 
-def merge_sources(ohlcv: pd.DataFrame, investor: pd.DataFrame, fund: pd.DataFrame) -> pd.DataFrame:
+def merge_sources(data: pd.DataFrame, ohlcv: pd.DataFrame, investor: pd.DataFrame, fund: pd.DataFrame) -> pd.DataFrame:
     """Outer-join on date, then sort."""
     dfs = []
+    if data is not None and len(data):
+        dfs.append(data)
     if ohlcv is not None and len(ohlcv):
         #dfs.append(_standardize_ohlcv(ohlcv))
         dfs.append(ohlcv)

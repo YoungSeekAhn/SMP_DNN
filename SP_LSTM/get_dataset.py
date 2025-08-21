@@ -18,104 +18,193 @@ from DSConfig import FeatureConfig
 # # 마지막 거래일 기준으로 시작일과 종료일 설정
 # # 시작일은 마지막 거래일로부터 2년 전으로 설정
 
-def _ensure_datetime_index(df: pd.DataFrame, date_col_candidates=("날짜","date","Date")) -> pd.DataFrame:
-    """Make sure dataframe has a DatetimeIndex named 'date'."""
-    if df is None or len(df)==0:
-        return df
-    dfc = df.copy()
-    if isinstance(dfc.index, pd.DatetimeIndex):
-        dfc.index.name = "date"
-        return dfc.sort_index()
-    for c in date_col_candidates:
-        if c in dfc.columns:
-            dfc[c] = pd.to_datetime(dfc[c])
-            dfc = dfc.set_index(c)
-            dfc.index.name = "date"
-            return dfc.sort_index()
-    # last resort: try to parse current index
-    try:
-        idx = pd.to_datetime(dfc.index)
-        dfc.index = idx
-        dfc.index.name = "date"
-        return dfc.sort_index()
-    except Exception:
-        raise ValueError("No datetime index or date column found. Provide a date column named one of: %s" % (date_col_candidates,))
+def _standardize_date(df: pd.DataFrame,
+                      date_cols: str = None,
+                      out_name: str = "date") -> pd.DataFrame:
+    """
+    df에서 날짜 컬럼을 찾아 표준 컬럼명(out_name, 기본 'date')으로 반환.
+    - 우선순위: (제공된 date_cols) -> ['date','data','Date','날짜','datetime','timestamp','time'] -> DatetimeIndex
+    - 결과는 단일 컬럼 DataFrame (컬럼명 out_name)
+    - timezone 제거(naive), 파싱 실패 행(NaT)은 제거
+    """
+    if df is None or df.empty:
+        raise ValueError("Empty DataFrame passed to _standardize_date")
 
-def _standardize_ohlcv(ohlcv: pd.DataFrame,price_cols) -> pd.DataFrame:
-    if ohlcv is None or len(ohlcv)==0:
+    # 1) 후보군 구성
+    candidates = []
+    if date_cols:
+        candidates.extend(list(date_cols))
+    candidates.extend(["date", "data", "Date", "날짜", "datetime", "timestamp", "time"])
+
+    # 2) 컬럼에서 찾기
+    found_col = next((c for c in candidates if c in df.columns), None)
+
+    if found_col is not None:
+        s = df[found_col]
+    else:
+        # 3) 인덱스가 날짜이면 인덱스 사용
+        if pd.api.types.is_datetime64_any_dtype(df.index):
+            s = pd.Series(df.index, index=df.index, name=out_name)
+        else:
+            raise KeyError(
+                "No date-like column found. "
+                f"Tried: {candidates}. Index is not datetime."
+            )
+
+    # 6) 단일 컬럼 DataFrame으로 반환
+    return s.to_frame()
+
+def _standardize_ohlcv(ohlcv: pd.DataFrame, price_cols) -> pd.DataFrame:
+    """
+    OHLCV 컬럼 표준화:
+      - 한국어/대소문자 다양한 표기를 영문 표준(open, high, low, close, volume, value, chg_pct)으로 통일
+      - price_cols(영문)가 이미 있으면 그대로 사용
+      - 숫자형 변환
+    Datetime 인덱스 강제 없음.
+    """
+    if ohlcv is None or len(ohlcv) == 0:
         return ohlcv
-    df = _ensure_datetime_index(ohlcv)
-    rename_map = {
-        "시가":"open", "고가":"high", "저가":"low", "종가":"close",
-        "거래량":"volume", "거래대금":"value", "등락률":"chg_pct",
-        "Open":"open","High":"high","Low":"low","Close":"close","Volume":"volume","Value":"value",
-        "open":"open","high":"high","low":"low","close":"close","volume":"volume","value":"value"
-    }
-    df = df.rename(columns=rename_map)
-    # keep common columns if exist
-    keep = [c for c in price_cols if c in df.columns]
-    df = df[keep]
-    for c in df.columns:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df
 
-def _standardize_investor(value_df: pd.DataFrame, flow_cols) -> pd.DataFrame:
-    """Select key investor groups and rename to english. Falls back if some missing."""
-    if value_df is None or len(value_df)==0:
-        return value_df
-    df = _ensure_datetime_index(value_df)
-    # Common column names in PyKRX (detail=True adds more columns)
-    # We'll try to pick ["개인", "외국인", "기관합계"] or reasonable fallbacks.
-    name_map = {}
+    df = ohlcv.copy()
+
+    # 한국어/영문 후보 매핑
     candidates = {
-        "inst_sum": ["기관합계","기관","기관투자자"],
-        "inst_ext": ["기타법인","법인","법인투자자"],
-        "retail": ["개인","개인합계","개인투자자"],
-        "foreign": ["외국인","외국인합계","외국인투자자"],
+        "open":    ["시가", "Open", "open"],
+        "high":    ["고가", "High", "high"],
+        "low":     ["저가", "Low", "low"],
+        "close":   ["종가", "Close", "close"],
+        "volume":  ["거래량", "Volume", "volume"],
+        "value":   ["거래대금", "Value", "value"],
+        "chg_pct": ["등락률", "chg_pct", "Change%", "change_pct"],
     }
+
+    name_map = {}
     for en, ko_list in candidates.items():
         for k in ko_list:
             if k in df.columns:
                 name_map[k] = en
                 break
-    # If none found, try lowercase english direct
-    for en in flow_cols:
-        if en not in name_map.values() and en in df.columns:
-            name_map[en] = en
-    # subset/rename
+
+    # price_cols에 이미 영문 키가 있으면 그대로 사용
+    if price_cols:
+        for en in price_cols:
+            if en in df.columns and en not in name_map.values():
+                # 이미 영문 컬럼명이면 그대로 두되, rename 대상엔 추가 안 함
+                name_map.setdefault(en, en)
+
+    # 선택 및 리네임
     select_cols = list(name_map.keys())
-    if not select_cols:
-        # keep all numeric columns but warn
+    if select_cols:
+        df_sel = df[select_cols].rename(columns=name_map).copy()
+    else:
+        # 매핑이 하나도 안 되면 숫자형 컬럼만 유지
         num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
         df_sel = df[num_cols].copy()
-    else:
-        df_sel = df[select_cols].rename(columns=name_map).copy()
-    # numeric
+
+    # 숫자 변환
     for c in df_sel.columns:
         df_sel[c] = pd.to_numeric(df_sel[c], errors="coerce")
+
+    return df_sel
+
+def _standardize_investor(value_df: pd.DataFrame, flow_cols) -> pd.DataFrame:
+    """
+    투자주체 컬럼 표준화:
+      - 한국어 컬럼명을 영어로 매핑(기관합계/개인/외국인/기타법인 등)
+      - 주어진 flow_cols가 이미 영어로 들어온 경우 그대로 사용
+      - 숫자형으로 변환
+    Datetime 인덱스 강제 없음.
+    """
+    if value_df is None or len(value_df) == 0:
+        return value_df
+
+    df = value_df.copy()
+
+    # 한국어 -> 영문 후보 매핑
+    candidates = {
+        "inst_sum": ["기관합계", "기관", "기관투자자"],
+        "inst_ext": ["기타법인", "법인", "법인투자자"],
+        "retail":   ["개인", "개인합계", "개인투자자"],
+        "foreign":  ["외국인", "외국인합계", "외국인투자자"],
+    }
+
+    name_map = {}
+    for en, ko_list in candidates.items():
+        for k in ko_list:
+            if k in df.columns:
+                name_map[k] = en
+                break
+
+    # flow_cols에 이미 영어 키가 있으면 그대로 사용
+    if flow_cols:
+        for en in flow_cols:
+            if en in df.columns and en not in name_map.values():
+                # 이미 영문 컬럼명이면 그대로 두되, rename 대상엔 추가 안 함
+                name_map.setdefault(en, en)
+
+    # 선택 및 리네임
+    select_cols = list(name_map.keys())
+    if select_cols:
+        df_sel = df[select_cols].rename(columns=name_map).copy()
+    else:
+        # 매핑이 하나도 안 되면 숫자형 컬럼만 유지
+        num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+        df_sel = df[num_cols].copy()
+
+    # 숫자 변환
+    for c in df_sel.columns:
+        df_sel[c] = pd.to_numeric(df_sel[c], errors="coerce")
+
     return df_sel
 
 def _standardize_fundamental(fund_df: pd.DataFrame, fund_cols) -> pd.DataFrame:
-    if fund_df is None or len(fund_df)==0:
+    """
+    펀더멘털 컬럼 표준화:
+      - 한국어/대소문자 다양한 표기를 표준 소문자(bps, per, pbr, eps, div, dps)로 통일
+      - fund_cols가 주어지면 그 교집합만 선택
+      - 숫자형으로 변환
+    Datetime 인덱스 강제 없음.
+    """
+    if fund_df is None or len(fund_df) == 0:
         return fund_df
-    df = _ensure_datetime_index(fund_df)
+
+    df = fund_df.copy()
+
     rename_map = {
-        "BPS":"bps","PER":"per","PBR":"pbr","EPS":"eps","DIV":"div","DPS":"dps",
-        "bps":"bps","per":"per","pbr":"pbr","eps":"eps","div":"div","dps":"dps"
+        "BPS": "bps", "PER": "per", "PBR": "pbr", "EPS": "eps", "DIV": "div", "DPS": "dps",
+        "bps": "bps", "per": "per", "pbr": "pbr", "eps": "eps", "div": "div", "dps": "dps",
+        "Bps": "bps", "Per": "per", "Pbr": "pbr", "Eps": "eps", "Div": "div", "Dps": "dps",
     }
     df = df.rename(columns=rename_map)
-    #keep = [c for c in ["per","pbr","div","bps","eps","dps"] if c in df.columns]
-    keep = [c for c in fund_cols if c in df.columns]
-    df = df[keep]
+
+    # 유지할 컬럼 선택
+    if fund_cols:
+        keep = [c for c in fund_cols if c in df.columns]
+        if keep:
+            df = df[keep].copy()
+        else:
+            # fund_cols가 비거나 교집합이 없으면 표준 키들 중 존재하는 것만
+            std = ["per", "pbr", "div", "bps", "eps", "dps"]
+            keep2 = [c for c in std if c in df.columns]
+            df = df[keep2].copy() if keep2 else df.copy()
+    else:
+        # fund_cols가 없으면 표준 키 우선
+        std = ["per", "pbr", "div", "bps", "eps", "dps"]
+        keep = [c for c in std if c in df.columns]
+        if keep:
+            df = df[keep].copy()
+
+    # 숫자 변환
     for c in df.columns:
         df[c] = pd.to_numeric(df[c], errors="coerce")
-    # fundamentals are often sparse (monthly/quarterly) -> forward-fill
-    df = df.sort_index().ffill()
+
     return df
 
-def merge_sources(ohlcv: pd.DataFrame, investor: pd.DataFrame, fund: pd.DataFrame) -> pd.DataFrame:
+def merge_sources(date: pd.DataFrame, ohlcv: pd.DataFrame, investor: pd.DataFrame, fund: pd.DataFrame) -> pd.DataFrame:
     """Outer-join on date, then sort."""
     dfs = []
+    if date is not None and len(date):
+        dfs.append(date)
     if ohlcv is not None and len(ohlcv):
         #dfs.append(_standardize_ohlcv(ohlcv))
         dfs.append(ohlcv)
@@ -164,8 +253,8 @@ def get_dataset(cfg, SAVE_CSV_FILE=True, PLOT_ROLLING=True) -> pd.DataFrame:
 
     print(f"Stock Name: {cfg.name}, Code: {Code} /n")
     print(f"Start Day: {Start_Date}, End Day: {End_Date}")
-
-    # # 1) Fetch OHLCV data
+    
+     # # 1) Fetch OHLCV data
     OHLCV_df = stock.get_market_ohlcv(Start_Date, End_Date, Code)
     OHLCV_df = _standardize_ohlcv(OHLCV_df, feature.price_cols)
     
@@ -176,11 +265,21 @@ def get_dataset(cfg, SAVE_CSV_FILE=True, PLOT_ROLLING=True) -> pd.DataFrame:
     # # 3) Fetch fundamental data
     Fund_df = stock.get_market_fundamental(Start_Date, End_Date, Code)
     Fund_df = _standardize_fundamental(Fund_df, feature.fund_cols)
-
+    
+    Date_df = _standardize_date(OHLCV_df, feature.date_cols)
     # # 4) Merge all sources
-    merge_df = merge_sources(OHLCV_df, Investor_df, Fund_df)
+    merge_df = merge_sources(Date_df, OHLCV_df, Investor_df, Fund_df)
+    merge_df = merge_df.reset_index(drop=True)
 
-
+    
+    if not merge_df.empty and float(merge_df['inst_sum'].iloc[-1]) == 0:
+        print("Today trading data not validated. Removing today data row.")
+        merge_df = merge_df.iloc[:-1].copy()
+        
+    
+    print(f"Data shape after merge: {merge_df.shape}")
+    print(f"Columns after merge: {merge_df.columns.tolist()}")
+    
     # 8) (선택) rolling h=1 경로
     if SAVE_CSV_FILE:
         print(merge_df.head())
